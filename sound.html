@@ -172,6 +172,7 @@
 </div>
 <h1 class="font-headline-lg text-headline-lg-mobile md:text-headline-lg uppercase italic mb-4">SOUND EXPERIENCE</h1>
 <p class="text-on-surface-variant max-w-2xl font-body-md">Immerse yourself in the mechanical soul of our fleet. Hover over a powerplant to ignite the ignition sequence and witness the frequency of pure performance.</p>
+<p class="text-on-surface-variant/50 max-w-2xl font-label-caps text-label-caps mt-3 tracking-widest">TAP/CLICK ANYWHERE ON THE PAGE ONCE TO ENABLE AUDIO, THEN HOVER AN ENGINE CARD</p>
 </div>
 <!-- Experience Grid -->
 <div class="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-gutter mb-32">
@@ -401,6 +402,9 @@
 
             // Simulate sound rumble via background shake
             document.body.classList.add('bg-surface-dim');
+
+            elementSoundType.set(element, type);
+            playEngineSound(type);
         }
 
         function stopRev(element) {
@@ -411,6 +415,156 @@
                 bar.classList.add('bg-white/10');
             });
             document.body.classList.remove('bg-surface-dim');
+
+            stopEngineSound(type_for(element));
+        }
+
+        // Track which type is currently playing per element so stopRev knows what to stop
+        const elementSoundType = new WeakMap();
+        function type_for(element) {
+            return elementSoundType.get(element);
+        }
+
+        // ---- Web Audio Engine Sound Synthesis ----
+        let audioCtx;
+        const activeSounds = {};
+
+        function getAudioCtx() {
+            if (!audioCtx) {
+                const AC = window.AudioContext || window.webkitAudioContext;
+                audioCtx = new AC();
+            }
+            if (audioCtx.state === 'suspended') {
+                audioCtx.resume();
+            }
+            return audioCtx;
+        }
+
+        // Unlock audio on the very first user interaction anywhere on the page,
+        // since browsers block audio until a real user gesture occurs.
+        function unlockAudio() {
+            getAudioCtx();
+            window.removeEventListener('pointerdown', unlockAudio);
+            window.removeEventListener('mouseenter', unlockAudio);
+        }
+        window.addEventListener('pointerdown', unlockAudio, { once: true });
+        window.addEventListener('mouseenter', unlockAudio, { once: true });
+
+        function createNoiseBuffer(ctx) {
+            const bufferSize = ctx.sampleRate * 2;
+            const buffer = ctx.createBuffer(1, bufferSize, ctx.sampleRate);
+            const data = buffer.getChannelData(0);
+            for (let i = 0; i < bufferSize; i++) {
+                data[i] = Math.random() * 2 - 1;
+            }
+            return buffer;
+        }
+
+        function playEngineSound(type) {
+            const ctx = getAudioCtx();
+            // If already playing this sound, leave it running
+            if (activeSounds[type]) return;
+
+            const now = ctx.currentTime;
+            const masterGain = ctx.createGain();
+            masterGain.gain.setValueAtTime(0, now);
+            masterGain.connect(ctx.destination);
+
+            const nodes = [];
+
+            if (type === 'v12') {
+                // Raspy naturally-aspirated V12 rumble: layered sawtooth oscillators, low-passed
+                const osc1 = ctx.createOscillator();
+                osc1.type = 'sawtooth';
+                osc1.frequency.setValueAtTime(45, now);
+                osc1.frequency.linearRampToValueAtTime(150, now + 1.2);
+
+                const osc2 = ctx.createOscillator();
+                osc2.type = 'sawtooth';
+                osc2.frequency.setValueAtTime(45 * 1.5, now);
+                osc2.frequency.linearRampToValueAtTime(150 * 1.5, now + 1.2);
+
+                const filter = ctx.createBiquadFilter();
+                filter.type = 'lowpass';
+                filter.frequency.setValueAtTime(700, now);
+                filter.frequency.linearRampToValueAtTime(2600, now + 1.2);
+
+                osc1.connect(filter);
+                osc2.connect(filter);
+                filter.connect(masterGain);
+
+                osc1.start();
+                osc2.start();
+                nodes.push(osc1, osc2);
+
+                masterGain.gain.linearRampToValueAtTime(0.18, now + 0.3);
+            } else if (type === 'ev') {
+                // High-pitched electric motor whirr sweeping upward
+                const osc = ctx.createOscillator();
+                osc.type = 'sine';
+                osc.frequency.setValueAtTime(300, now);
+                osc.frequency.exponentialRampToValueAtTime(2400, now + 1.5);
+
+                const osc2 = ctx.createOscillator();
+                osc2.type = 'triangle';
+                osc2.frequency.setValueAtTime(600, now);
+                osc2.frequency.exponentialRampToValueAtTime(4800, now + 1.5);
+
+                osc.connect(masterGain);
+                osc2.connect(masterGain);
+
+                osc.start();
+                osc2.start();
+                nodes.push(osc, osc2);
+
+                masterGain.gain.linearRampToValueAtTime(0.05, now + 0.3);
+            } else if (type === 'turbo') {
+                // Filtered noise with a fluttering bandpass sweep for turbo blow-off
+                const noise = ctx.createBufferSource();
+                noise.buffer = createNoiseBuffer(ctx);
+                noise.loop = true;
+
+                const filter = ctx.createBiquadFilter();
+                filter.type = 'bandpass';
+                filter.frequency.setValueAtTime(900, now);
+                filter.Q.value = 6;
+                filter.frequency.linearRampToValueAtTime(2200, now + 1.2);
+
+                // LFO creates the "flutter"
+                const lfo = ctx.createOscillator();
+                lfo.type = 'sine';
+                lfo.frequency.value = 12;
+                const lfoGain = ctx.createGain();
+                lfoGain.gain.value = 400;
+                lfo.connect(lfoGain);
+                lfoGain.connect(filter.frequency);
+
+                noise.connect(filter);
+                filter.connect(masterGain);
+
+                noise.start();
+                lfo.start();
+                nodes.push(noise, lfo);
+
+                masterGain.gain.linearRampToValueAtTime(0.12, now + 0.3);
+            }
+
+            activeSounds[type] = { masterGain, nodes };
+        }
+
+        function stopEngineSound(type) {
+            if (!type || !audioCtx) return;
+            const sound = activeSounds[type];
+            if (!sound) return;
+            const ctx = audioCtx;
+            const now = ctx.currentTime;
+            sound.masterGain.gain.cancelScheduledValues(now);
+            sound.masterGain.gain.setValueAtTime(sound.masterGain.gain.value, now);
+            sound.masterGain.gain.linearRampToValueAtTime(0, now + 0.4);
+            sound.nodes.forEach((node) => {
+                try { node.stop(now + 0.45); } catch (e) { /* already stopped */ }
+            });
+            delete activeSounds[type];
         }
     </script>
 </body></html>
